@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+envs/
+*.conda/
+
+# 模型权重与数据（不入库）
+models/*.pt
+models/*.pth
+data/*
+
+# IDE
+.vscode/
+.idea/
+
+# 其他
+.DS_Store
