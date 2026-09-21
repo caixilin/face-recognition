@@ -8,9 +8,20 @@ envs/
 *.conda/
 
 # 模型权重与数据（不入库）
-models/*.pt
-models/*.pth
-data/*
+# 注意：必须用 ** 递归匹配，权重实际位于 models/<子目录>/ 下
+models/**/*.pt
+models/**/*.pth
+models/**/*.ckpt
+models/**/*.onnx
+data/**
+
+# 训练产物（不入库）
+train/models/**
+train/log/**
+train/result-graphs/**
+!train/models/.gitkeep
+!train/log/.gitkeep
+!train/result-graphs/.gitkeep
 
 # IDE
 .vscode/
