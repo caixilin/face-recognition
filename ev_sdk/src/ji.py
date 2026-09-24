@@ -7,20 +7,66 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import numpy as np
 import torch
 
-from model_api import FaceAttributeRuntime
+from model_api import (
+    FaceDetection,
+    FaceAttributeRuntime,
+    FaceXFormerAdapter,
+    SwinFaceAdapter,
+)
+
+
+def _find_weight(name: str) -> str:
+    for root in (Path("/project/ev_sdk/model"), Path(__file__).resolve().parents[1] / "model"):
+        path = root / name
+        if path.exists():
+            return str(path)
+    raise FileNotFoundError(f"模型权重不存在: {name}")
 
 
 def init():
     """初始化检测器和属性模型，返回平台后续复用的句柄。"""
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    del device
+    from facenet_pytorch import MTCNN
 
-    # 接入模型时在这里构造检测器、FaceXFormerAdapter 和 SwinFaceAdapter。
-    # 权重路径必须位于 /project/ev_sdk/model/，不要写入 ev_sdk 源码目录。
-    return FaceAttributeRuntime()
+    detector_model = MTCNN(keep_all=True, device=device)
+
+    def detector(image):
+        image_rgb = image[:, :, ::-1]
+        boxes, probabilities = detector_model.detect(image_rgb)
+        if boxes is None:
+            return []
+        detections = []
+        for box, probability in zip(boxes, probabilities):
+            x_min, y_min, x_max, y_max = [int(value) for value in box]
+            detections.append(
+                FaceDetection(
+                    head_bbox=(x_min, y_min, x_max - x_min, y_max - y_min),
+                    person_bbox=(
+                        max(0, x_min - (x_max - x_min) // 2),
+                        max(0, y_min - (y_max - y_min)),
+                        min(image.shape[1], x_max + (x_max - x_min) // 2)
+                        - max(0, x_min - (x_max - x_min) // 2),
+                        min(image.shape[0], y_max + (y_max - y_min) * 2)
+                        - max(0, y_min - (y_max - y_min)),
+                    ),
+                    confidence=float(probability),
+                )
+            )
+        return detections
+
+    return FaceAttributeRuntime(
+        detector=detector,
+        facexformer=FaceXFormerAdapter(
+            _find_weight("facexformer/model.pt"), device
+        ),
+        swinface=SwinFaceAdapter(
+            _find_weight("swinface/checkpoint_step_79999_gpu_0.pt"), device
+        ),
+    )
 
 
 @torch.no_grad()

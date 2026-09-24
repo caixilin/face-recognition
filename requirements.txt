@@ -3,9 +3,10 @@
 # 环境: Python 3.7 / PyTorch 1.11 / CUDA 11.3
 # =============================================================================
 
-# 深度学习框架（由 install_env.sh 单独安装，此处注释避免版本冲突）
-# torch==1.11.0+cu113
-# torchvision==0.12.0+cu113
+# 深度学习框架由 env/install_env.sh 安装；本文件保留 CPU/平台环境的依赖声明。
+torch==1.11.0
+torchvision==0.12.0
+facenet-pytorch==2.5.3
 
 # 图像处理
 opencv-python==4.5.5.64

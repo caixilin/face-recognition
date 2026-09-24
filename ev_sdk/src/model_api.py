@@ -5,6 +5,8 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
+from pathlib import Path
+import sys
 
 import numpy as np
 
@@ -38,8 +40,6 @@ class AttributePrediction:
     hat: str = UNKNOWN_ATTRIBUTE
     whiskers: str = UNKNOWN_ATTRIBUTE
     # SwinFace 原始标签可能包含 expression；当前赛题正式输出使用 emotion。
-    expression: str = UNKNOWN_ATTRIBUTE
-
     def update_known(self, other: "AttributePrediction") -> None:
         """使用另一个模型的非未知结果补充或覆盖当前结果。"""
         for field_name in self.__dataclass_fields__:
@@ -63,11 +63,16 @@ class FaceXFormerAdapter(AttributeModelAdapter):
     def __init__(self, model_path: str, device: str) -> None:
         self.model_path = model_path
         self.device = device
-        # 在这里创建 FaceXFormer 并加载 /project/ev_sdk/model/ 下的权重。
+        self._analyzer = _build_analyzer(model_path, None, device)
 
     def predict(self, face_crop: np.ndarray) -> AttributePrediction:
-        del face_crop
-        raise NotImplementedError("FaceXFormer 推理尚未接入")
+        self._analyzer._ensure_facexformer()
+        result = self._analyzer._run_facexformer(face_crop)
+        return AttributePrediction(
+            toward=_toward_value(result.get("orientation")),
+            gender=_gender_value(result.get("gender")),
+            race=_string_value(result.get("race")),
+        )
 
 
 class SwinFaceAdapter(AttributeModelAdapter):
@@ -76,11 +81,18 @@ class SwinFaceAdapter(AttributeModelAdapter):
     def __init__(self, model_path: str, device: str) -> None:
         self.model_path = model_path
         self.device = device
-        # 在这里创建 SwinFace 并加载 /project/ev_sdk/model/ 下的权重。
+        self._analyzer = _build_analyzer(None, model_path, device)
 
     def predict(self, face_crop: np.ndarray) -> AttributePrediction:
-        del face_crop
-        raise NotImplementedError("SwinFace 推理尚未接入")
+        self._analyzer._ensure_swinface()
+        result = self._analyzer._run_swinface(face_crop)
+        return AttributePrediction(
+            glasses=_binary_value(result.get("eyeglasses"), positive="1"),
+            emotion=_emotion_value(result.get("expression")),
+            hat=_binary_value(result.get("wearing_hat"), positive="1"),
+            whiskers=_mustache_value(result),
+            age=_age_value(result.get("age")),
+        )
 
 
 class FaceAttributeRuntime:
@@ -149,3 +161,76 @@ def _bbox_object(bbox: BBox, target_id: str, name: str) -> Dict[str, Any]:
         "id": str(target_id),
         "name": name,
     }
+
+
+def _build_analyzer(facexformer_path: Optional[str], swinface_path: Optional[str], device: str):
+    """加载仓库内的通用分析器；平台部署时需将 src/ 一并放入 SDK 包。"""
+    root = Path(__file__).resolve().parents[2]
+    project_root = root.parent
+    candidates = [root / "src", Path("/project/ev_sdk/src"), Path("/project/src")]
+    for candidate in candidates:
+        if (candidate / "face_attr").exists() and str(candidate) not in sys.path:
+            sys.path.insert(0, str(candidate))
+    from face_attr.analyzer import AttributeAnalyzer
+
+    if facexformer_path is None:
+        facexformer_path = _optional_weight(
+            "facexformer/model.pt", project_root / "models" / "facexformer" / "model.pt"
+        )
+    if swinface_path is None:
+        swinface_path = _optional_weight(
+            "swinface/checkpoint_step_79999_gpu_0.pt",
+            project_root / "models" / "swinface" / "checkpoint_step_79999_gpu_0.pt",
+        )
+    return AttributeAnalyzer(
+        device=device,
+        facexformer_weights=facexformer_path,
+        swinface_weights=swinface_path,
+    )
+
+
+def _optional_weight(relative_name: str, local_path: Path) -> str:
+    platform_path = Path("/project/ev_sdk/model") / relative_name
+    if platform_path.exists():
+        return str(platform_path)
+    return str(local_path)
+
+
+def _string_value(value: Any) -> str:
+    return UNKNOWN_ATTRIBUTE if value is None else str(value)
+
+
+def _age_value(value: Any) -> str:
+    if value is None:
+        return UNKNOWN_ATTRIBUTE
+    return str(max(0, min(100, round(float(value)))))
+
+
+def _gender_value(value: Any) -> str:
+    if value in {"male", "female"}:
+        return value
+    return UNKNOWN_ATTRIBUTE
+
+
+def _toward_value(value: Any) -> str:
+    if value == "front":
+        return "front"
+    if value in {"back", "left", "right", "up", "down"}:
+        return "back" if value == "back" else "other"
+    return UNKNOWN_ATTRIBUTE
+
+
+def _emotion_value(value: Any) -> str:
+    mapping = {"angry": "0", "happy": "1", "neutral": "2"}
+    return mapping.get(str(value), UNKNOWN_ATTRIBUTE)
+
+
+def _binary_value(value: Any, positive: str) -> str:
+    if value is None:
+        return UNKNOWN_ATTRIBUTE
+    return positive if float(value) >= 0.5 else "0"
+
+
+def _mustache_value(result: Dict[str, Any]) -> str:
+    value = result.get("mustache")
+    return UNKNOWN_ATTRIBUTE if value is None else ("1" if float(value) >= 0.5 else "0")

@@ -17,20 +17,12 @@ import argparse
 import os
 import random
 import time
-from pathlib import Path
-
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, random_split
 
-from dataset import (
-    EXPRESSION_CLASSES,
-    GENDER_CLASSES,
-    ORIENTATION_CLASSES,
-    FaceAttributeDataset,
-    get_data_dir,
-)
+from dataset import ATTRIBUTE_NAMES, FaceAttributeDataset, get_data_dir
 from model import build_model
 
 # 极市平台固定目录
@@ -69,13 +61,11 @@ def train_one_epoch(
     model.train()
     total_loss = 0.0
     total_age_loss = 0.0
-    total_gender_loss = 0.0
-    total_expr_loss = 0.0
-    total_orient_loss = 0.0
+    attribute_losses = {name: 0.0 for name in ATTRIBUTE_NAMES if name != "age"}
     num_batches = 0
 
-    age_criterion = nn.MSELoss()
-    ce_criterion = nn.CrossEntropyLoss()
+    ce_criterion = nn.CrossEntropyLoss(ignore_index=-1)
+    toward_loss_weight = 2.0
 
     for images, labels in dataloader:
         images = images.to(device)
@@ -83,12 +73,21 @@ def train_one_epoch(
 
         outputs = model(images)
 
-        age_loss = age_criterion(outputs["age"], labels["age"])
-        gender_loss = ce_criterion(outputs["gender"], labels["gender"])
-        expr_loss = ce_criterion(outputs["expression"], labels["expression"])
-        orient_loss = ce_criterion(outputs["orientation"], labels["orientation"])
-
-        loss = age_loss + gender_loss + expr_loss + orient_loss
+        age_mask = labels["age"] >= 0
+        age_loss = (
+            ((outputs["age"] - labels["age"]) ** 2)[age_mask].mean()
+            if age_mask.any()
+            else outputs["age"].sum() * 0.0
+        )
+        loss = age_loss
+        for name in ATTRIBUTE_NAMES:
+            if name == "age":
+                continue
+            attribute_loss = ce_criterion(outputs[name], labels[name])
+            if name == "toward":
+                attribute_loss = toward_loss_weight * attribute_loss
+            attribute_losses[name] += attribute_loss.item()
+            loss = loss + attribute_loss
 
         optimizer.zero_grad()
         loss.backward()
@@ -96,18 +95,11 @@ def train_one_epoch(
 
         total_loss += loss.item()
         total_age_loss += age_loss.item()
-        total_gender_loss += gender_loss.item()
-        total_expr_loss += expr_loss.item()
-        total_orient_loss += orient_loss.item()
         num_batches += 1
 
-    return {
-        "loss": total_loss / num_batches,
-        "age_loss": total_age_loss / num_batches,
-        "gender_loss": total_gender_loss / num_batches,
-        "expr_loss": total_expr_loss / num_batches,
-        "orient_loss": total_orient_loss / num_batches,
-    }
+    return {"loss": total_loss / num_batches, "age_loss": total_age_loss / num_batches, **{
+        f"{name}_loss": value / num_batches for name, value in attribute_losses.items()
+    }}
 
 
 @torch.no_grad()
@@ -119,13 +111,11 @@ def evaluate(
     """在验证集上评估模型。"""
     model.eval()
     total_loss = 0.0
-    correct_gender = 0
-    correct_expr = 0
-    correct_orient = 0
+    correct = {name: 0 for name in ATTRIBUTE_NAMES if name not in {"age"}}
     total = 0
 
-    age_criterion = nn.MSELoss()
-    ce_criterion = nn.CrossEntropyLoss()
+    ce_criterion = nn.CrossEntropyLoss(ignore_index=-1)
+    toward_loss_weight = 2.0
 
     for images, labels in dataloader:
         images = images.to(device)
@@ -133,31 +123,32 @@ def evaluate(
 
         outputs = model(images)
 
-        age_loss = age_criterion(outputs["age"], labels["age"])
-        gender_loss = ce_criterion(outputs["gender"], labels["gender"])
-        expr_loss = ce_criterion(outputs["expression"], labels["expression"])
-        orient_loss = ce_criterion(outputs["orientation"], labels["orientation"])
-        loss = age_loss + gender_loss + expr_loss + orient_loss
+        age_mask = labels["age"] >= 0
+        age_loss = (
+            ((outputs["age"] - labels["age"]) ** 2)[age_mask].mean()
+            if age_mask.any()
+            else outputs["age"].sum() * 0.0
+        )
+        loss = age_loss
+        for name in ATTRIBUTE_NAMES:
+            if name == "age":
+                continue
+            attribute_loss = ce_criterion(outputs[name], labels[name])
+            if name == "toward":
+                attribute_loss = toward_loss_weight * attribute_loss
+            loss = loss + attribute_loss
 
         total_loss += loss.item()
         total += images.size(0)
 
-        correct_gender += (
-            (outputs["gender"].argmax(1) == labels["gender"]).sum().item()
-        )
-        correct_expr += (
-            (outputs["expression"].argmax(1) == labels["expression"]).sum().item()
-        )
-        correct_orient += (
-            (outputs["orientation"].argmax(1) == labels["orientation"]).sum().item()
-        )
+        for name in correct:
+            valid = labels[name] >= 0
+            correct[name] += ((outputs[name].argmax(1) == labels[name]) & valid).sum().item()
 
     num_batches = max(1, len(dataloader))
     return {
         "loss": total_loss / num_batches,
-        "gender_acc": correct_gender / total,
-        "expr_acc": correct_expr / total,
-        "orient_acc": correct_orient / total,
+        **{f"{name}_acc": value / total for name, value in correct.items()},
     }
 
 
@@ -185,13 +176,22 @@ def main() -> None:
     data_dir = args.data_dir or get_data_dir()
     log(f"数据集目录: {data_dir}")
 
-    # 数据集
-    train_dataset = FaceAttributeDataset(
-        os.path.join(data_dir, "train"), input_size=args.input_size
-    )
-    val_dataset = FaceAttributeDataset(
-        os.path.join(data_dir, "val"), input_size=args.input_size
-    )
+    # 数据集支持 train/val 目录，也支持极市实际的编号目录布局。
+    train_dir = os.path.join(data_dir, "train")
+    val_dir = os.path.join(data_dir, "val")
+    if os.path.isdir(train_dir) and os.path.isdir(val_dir):
+        train_dataset = FaceAttributeDataset(train_dir, input_size=args.input_size)
+        val_dataset = FaceAttributeDataset(val_dir, input_size=args.input_size)
+    else:
+        full_dataset = FaceAttributeDataset(data_dir, input_size=args.input_size)
+        val_size = max(1, int(len(full_dataset) * 0.2))
+        train_size = len(full_dataset) - val_size
+        if train_size < 1:
+            raise RuntimeError("数据集样本数不足，至少需要 2 个有效标注样本")
+        split_generator = torch.Generator().manual_seed(args.seed)
+        train_dataset, val_dataset = random_split(
+            full_dataset, [train_size, val_size], generator=split_generator
+        )
     log(f"训练样本数: {len(train_dataset)}, 验证样本数: {len(val_dataset)}")
 
     train_loader = DataLoader(
@@ -218,8 +218,8 @@ def main() -> None:
             f"train_loss={train_metrics['loss']:.4f} "
             f"val_loss={val_metrics['loss']:.4f} "
             f"gender_acc={val_metrics['gender_acc']:.4f} "
-            f"expr_acc={val_metrics['expr_acc']:.4f} "
-            f"orient_acc={val_metrics['orient_acc']:.4f}"
+            f"emotion_acc={val_metrics['emotion_acc']:.4f} "
+            f"toward_acc={val_metrics['toward_acc']:.4f}"
         )
 
         # 保存最优模型到 /project/train/models/

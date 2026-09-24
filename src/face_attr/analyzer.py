@@ -117,8 +117,14 @@ class AttributeAnalyzer:
 
     def _ensure_models(self) -> None:
         """按需加载两个模型（懒加载）。"""
+        self._ensure_facexformer()
+        self._ensure_swinface()
+
+    def _ensure_facexformer(self) -> None:
         if self._facexformer is None:
             self._facexformer = self._load_facexformer()
+
+    def _ensure_swinface(self) -> None:
         if self._swinface is None:
             self._swinface = self._load_swinface()
 
@@ -143,6 +149,7 @@ class AttributeAnalyzer:
                 ),
             ]
         )
+        face_crop = cv2.cvtColor(face_crop, cv2.COLOR_BGR2RGB)
         return transform(face_crop).unsqueeze(0)
 
     @staticmethod
@@ -192,7 +199,10 @@ class AttributeAnalyzer:
         _, _, _, _, age_output, gender_output, race_output, _ = self._facexformer(
             data["image"], data["label"], data["task"]
         )
-        result["age"] = float(age_output.item())
+        if age_output.numel() == 1:
+            result["age"] = float(age_output.item())
+        else:
+            result["age"] = float(age_output.argmax(1).item())
         result["gender"] = "male" if gender_output.argmax(1).item() == 0 else "female"
         result["race"] = int(race_output.argmax(1).item())
 
@@ -205,7 +215,8 @@ class AttributeAnalyzer:
         output = self._swinface(img)
 
         result: dict = {}
-        result["age"] = float(output["Age"].item())
+        age_output = output["Age"]
+        result["age"] = float(age_output.reshape(-1)[0].item())
         result["expression"] = SWINFACE_EXPRESSION_CLASSES[
             int(output["Expression"].argmax(1).item())
         ]
