@@ -26,23 +26,12 @@
 
 ```text
 人脸识别/
+├── project/                  # 可整体上传的云平台工程容器
+│   ├── train/                # 模型开发（对应 /project/train/）
+│   └── ev_sdk/               # 算法开发（对应 /project/ev_sdk/）
 ├── env/
 │   └── install_env.sh        # 环境安装脚本
-├── train/                    # 模型开发（对应 /project/train/）
-│   ├── src_repo/             # 训练代码（对应 /project/train/src_repo/）
-│   │   ├── train.py          # 训练主脚本
-│   │   ├── model.py          # 模型定义
-│   │   ├── dataset.py        # 数据集加载
-│   │   └── run.sh            # 训练命令脚本
-│   ├── models/               # 模型保存（对应 /project/train/models/）
-│   ├── log/                  # 日志保存（对应 /project/train/log/）
-│   └── result-graphs/        # 训练结果图（对应 /project/train/result-graphs/）
-├── ev_sdk/                   # 算法开发（对应 /project/ev_sdk/）
-│   └── src/
-│       └── ji.py             # 自动测试脚本
-├── src/face_attr/            # 本地核心源码
 ├── tests/                    # 单元测试
-├── models/                   # 本地模型权重（不入库）
 ├── data/                     # 本地数据（不入库）
 ├── docs/                     # 文档
 ├── pyproject.toml            # 项目配置
@@ -85,19 +74,9 @@ pip install -r requirements.txt
 
 ## 使用
 
-### 本地运行
-
-```bash
-# 处理单张图像
-python -m face_attr.main path/to/image.jpg --device cpu
-
-# 保存结果到文件
-python -m face_attr.main path/to/image.jpg --output result.json
-```
-
 ### 极市平台训练
 
-将 `train/` 目录内容上传到极市平台 `/project/train/`，然后在平台发起训练：
+将本地 `project/train/` 目录内容上传到极市平台 `/project/train/`，然后在平台发起训练：
 
 ```bash
 bash /project/train/src_repo/run.sh
@@ -105,7 +84,7 @@ bash /project/train/src_repo/run.sh
 
 ### 极市平台测试
 
-将 `ev_sdk/src/ji.py` 放到 `/project/ev_sdk/src/`，发起模型测试。
+将本地 `project/ev_sdk/` 目录内容上传到极市平台 `/project/ev_sdk/`，发起模型测试。
 
 ## 测试
 

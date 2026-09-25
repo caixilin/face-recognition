@@ -16,16 +16,16 @@ models/**/*.onnx
 data/**
 
 # SDK 部署权重（过大，不入库，本地保留）
-ev_sdk/model/**/*.pt
-ev_sdk/model/**/*.pth
+project/ev_sdk/model/**/*.pt
+project/ev_sdk/model/**/*.pth
 
 # 训练产物（不入库）
-train/models/**
-train/log/**
-train/result-graphs/**
-!train/models/.gitkeep
-!train/log/.gitkeep
-!train/result-graphs/.gitkeep
+project/train/models/**
+project/train/log/**
+project/train/result-graphs/**
+!project/train/models/.gitkeep
+!project/train/log/.gitkeep
+!project/train/result-graphs/.gitkeep
 
 # IDE
 .vscode/
