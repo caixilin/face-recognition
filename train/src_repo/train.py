@@ -51,6 +51,16 @@ def log(msg: str) -> None:
         f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}\n")
 
 
+def masked_cross_entropy(
+    logits: torch.Tensor, targets: torch.Tensor, criterion: nn.CrossEntropyLoss
+) -> torch.Tensor:
+    """对有效标签计算交叉熵；整批标签缺失时返回零损失。"""
+    valid = targets >= 0
+    if not valid.any():
+        return logits.sum() * 0.0
+    return criterion(logits, targets)
+
+
 def train_one_epoch(
     model: nn.Module,
     dataloader: DataLoader,
@@ -83,7 +93,7 @@ def train_one_epoch(
         for name in ATTRIBUTE_NAMES:
             if name == "age":
                 continue
-            attribute_loss = ce_criterion(outputs[name], labels[name])
+            attribute_loss = masked_cross_entropy(outputs[name], labels[name], ce_criterion)
             if name == "toward":
                 attribute_loss = toward_loss_weight * attribute_loss
             attribute_losses[name] += attribute_loss.item()
@@ -133,7 +143,7 @@ def evaluate(
         for name in ATTRIBUTE_NAMES:
             if name == "age":
                 continue
-            attribute_loss = ce_criterion(outputs[name], labels[name])
+            attribute_loss = masked_cross_entropy(outputs[name], labels[name], ce_criterion)
             if name == "toward":
                 attribute_loss = toward_loss_weight * attribute_loss
             loss = loss + attribute_loss

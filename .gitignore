@@ -15,6 +15,10 @@ models/**/*.ckpt
 models/**/*.onnx
 data/**
 
+# SDK 部署权重（过大，不入库，本地保留）
+ev_sdk/model/**/*.pt
+ev_sdk/model/**/*.pth
+
 # 训练产物（不入库）
 train/models/**
 train/log/**
