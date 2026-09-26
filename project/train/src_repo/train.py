@@ -196,11 +196,13 @@ def main() -> None:
     # 数据集支持 train/val 目录，也支持极市实际的编号目录布局。
     train_dir = os.path.join(data_dir, "train")
     val_dir = os.path.join(data_dir, "val")
+    log("正在扫描数据集（大目录首次扫描需要一些时间）...")
     if os.path.isdir(train_dir) and os.path.isdir(val_dir):
-        train_dataset = FaceAttributeDataset(train_dir, input_size=args.input_size)
-        val_dataset = FaceAttributeDataset(val_dir, input_size=args.input_size)
+        log("检测到 train/val 子目录，直接使用预划分数据集")
+        train_dataset = FaceAttributeDataset(train_dir, input_size=args.input_size, logger=log)
+        val_dataset = FaceAttributeDataset(val_dir, input_size=args.input_size, logger=log)
     else:
-        full_dataset = FaceAttributeDataset(data_dir, input_size=args.input_size)
+        full_dataset = FaceAttributeDataset(data_dir, input_size=args.input_size, logger=log)
         if args.max_samples is not None:
             sample_count = min(args.max_samples, len(full_dataset))
             full_dataset = Subset(full_dataset, range(sample_count))
