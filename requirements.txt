@@ -6,6 +6,7 @@
 # 深度学习框架由 env/install_env.sh 安装；本文件保留 CPU/平台环境的依赖声明。
 torch==1.11.0
 torchvision==0.12.0
+timm==0.6.13
 facenet-pytorch==2.5.3
 
 # 图像处理

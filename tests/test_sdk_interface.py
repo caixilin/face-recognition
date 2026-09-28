@@ -16,15 +16,18 @@ from model_api import (  # noqa: E402
     AttributePrediction,
     FaceAttributeRuntime,
     FaceDetection,
+    _gender_value,
 )
 
 
 class StubAdapter(AttributeModelAdapter):
     def __init__(self, prediction: AttributePrediction) -> None:
         self.prediction = prediction
+        self.call_count = 0
 
     def predict(self, face_crop: np.ndarray) -> AttributePrediction:
         assert face_crop.shape == (20, 20, 3)
+        self.call_count += 1
         return self.prediction
 
 
@@ -59,6 +62,32 @@ def test_runtime_fuses_facexformer_and_swinface_outputs():
     assert objects[1]["gender"] == "1"
     assert objects[1]["emotion"] == "2"
     assert "expression" not in objects[1]
+    assert facexformer.call_count == 1
+    assert swinface.call_count == 1
+
+
+def test_runtime_skips_swinface_for_non_front_face():
+    detector = lambda image: [  # noqa: E731
+        FaceDetection(head_bbox=(10, 5, 20, 20))
+    ]
+    facexformer = StubAdapter(AttributePrediction(toward="back", gender="1"))
+    swinface = StubAdapter(AttributePrediction(glasses="1", emotion="2"))
+    runtime = FaceAttributeRuntime(detector, facexformer, swinface)
+
+    objects = runtime.process(np.zeros((80, 80, 3), dtype=np.uint8))
+
+    assert objects[0]["toward"] == "back"
+    assert objects[0]["gender"] == "1"
+    assert objects[0]["glasses"] == "-1"
+    assert facexformer.call_count == 1
+    assert swinface.call_count == 0
+
+
+def test_gender_value_uses_rank_gender_encoding():
+    assert _gender_value("female") == "0"
+    assert _gender_value("male") == "1"
+    assert _gender_value("0") == "0"
+    assert _gender_value("1") == "1"
 
 
 def test_process_image_returns_extrememart_json(monkeypatch):

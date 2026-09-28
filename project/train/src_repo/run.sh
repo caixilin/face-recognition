@@ -20,13 +20,25 @@ mkdir -p /project/train/models
 mkdir -p /project/train/log
 mkdir -p /project/train/result-graphs
 
-# 启动训练（使用绝对路径）
-python /project/train/src_repo/train.py \
+# 依次微调 SDK 使用的两个模型。
+python /project/train/src_repo/finetune_facexformer.py \
     --data_dir /home/data \
-    --epochs 50 \
-    --batch_size 32 \
-    --lr 1e-3 \
-    --input_size 112 \
-    --device cuda
+    --epochs 5 \
+    --batch_size 16 \
+    --lr 1e-5 \
+    --num_workers 4 \
+    --device cuda \
+    --checkpoint /project/ev_sdk/model/facexformer/model_original.pt \
+    --output /project/train/models/facexformer_finetuned.pt
 
-echo "训练完成，模型已保存至 /project/train/models/"
+python /project/train/src_repo/finetune_swinface.py \
+    --data_dir /home/data \
+    --epochs 5 \
+    --batch_size 32 \
+    --lr 1e-5 \
+    --num_workers 4 \
+    --device cuda \
+    --checkpoint /project/ev_sdk/model/swinface/checkpoint_original.pt \
+    --output /project/train/models/swinface_finetuned.pt
+
+echo "训练完成，临时微调权重已保存至 /project/train/models/"

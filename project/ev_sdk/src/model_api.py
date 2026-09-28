@@ -126,7 +126,7 @@ class FaceAttributeRuntime:
             prediction = AttributePrediction()
             if self.facexformer is not None:
                 prediction.update_known(self.facexformer.predict(face_crop))
-            if self.swinface is not None:
+            if self.swinface is not None and prediction.toward == "front":
                 prediction.update_known(self.swinface.predict(face_crop))
 
             if detection.person_bbox is not None:
@@ -207,8 +207,12 @@ def _age_value(value: Any) -> str:
 
 
 def _gender_value(value: Any) -> str:
-    if value in {"male", "female"}:
+    if value in {"0", "1"}:
         return value
+    if value == "male":
+        return "1"
+    if value == "female":
+        return "0"
     return UNKNOWN_ATTRIBUTE
 
 

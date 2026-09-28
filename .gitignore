@@ -27,6 +27,9 @@ project/train/result-graphs/**
 !project/train/log/.gitkeep
 !project/train/result-graphs/.gitkeep
 
+# 离线依赖包（过大，不入库，本地保留）
+wheelhouse/**
+
 # IDE
 .vscode/
 .idea/
