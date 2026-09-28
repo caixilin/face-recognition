@@ -2,9 +2,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torchvision.models as models
 from typing import Any, Optional, Tuple, Type
-from torchvision.models import swin_b
+from ..swin_b_compat import SwinBCompat
 from .transformer import TwoWayTransformer, LayerNorm2d
 
 class MLP(nn.Module):
@@ -191,7 +190,7 @@ class FaceXFormer(nn.Module):
     def __init__(self):
         super(FaceXFormer, self).__init__()
 
-        swin_v2 = swin_b(weights='IMAGENET1K_V1')
+        swin_v2 = SwinBCompat()
         self.backbone = torch.nn.Sequential(*(list(swin_v2.children())[:-1]))
         self.target_layer_names = ['0.1', '0.3', '0.5', '0.7']
         self.multi_scale_features = []

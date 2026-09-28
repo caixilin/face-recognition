@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 
 
-SDK_SRC = Path(__file__).parents[1] / "ev_sdk" / "src"
+SDK_SRC = Path(__file__).parents[1] / "project" / "ev_sdk" / "src"
 sys.path.insert(0, str(SDK_SRC))
 
 from model_api import (  # noqa: E402
