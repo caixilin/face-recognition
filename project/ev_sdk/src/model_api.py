@@ -71,7 +71,7 @@ class FaceXFormerAdapter(AttributeModelAdapter):
         return AttributePrediction(
             toward=_toward_value(result.get("orientation")),
             gender=_gender_value(result.get("gender")),
-            race=_string_value(result.get("race")),
+            race=_race_value(result.get("race")),
         )
 
 
@@ -128,6 +128,10 @@ class FaceAttributeRuntime:
                 prediction.update_known(self.facexformer.predict(face_crop))
             if self.swinface is not None and prediction.toward == "front":
                 prediction.update_known(self.swinface.predict(face_crop))
+            if prediction.toward == "back":
+                # 榜单示例中 toward=back 的目标所有属性均为 -1；且 ACC 规则 2 规定
+                # back 识别正确即判对，属性不参与判分，这里统一置为未知。
+                prediction = AttributePrediction(toward="back")
 
             if detection.person_bbox is not None:
                 objects.append(
@@ -142,6 +146,9 @@ class FaceAttributeRuntime:
                     "age": prediction.age,
                     "race": prediction.race,
                     "emotion": prediction.emotion,
+                    # 榜单文档里 objects 字段同时列出了 expression 与 emotion，
+                    # 且示例用的是 expression；两个键都输出，避免判分脚本读不到表情。
+                    "expression": prediction.emotion,
                     "mask": prediction.mask,
                     "hat": prediction.hat,
                     "whiskers": prediction.whiskers,
@@ -165,9 +172,8 @@ def _bbox_object(bbox: BBox, target_id: str, name: str) -> Dict[str, Any]:
 
 def _build_analyzer(facexformer_path: Optional[str], swinface_path: Optional[str], device: str):
     """加载仓库内的通用分析器；平台部署时需将 src/ 一并放入 SDK 包。"""
-    root = Path(__file__).resolve().parents[2]
-    project_root = root.parent
-    candidates = [root / "src", Path("/project/ev_sdk/src"), Path("/project/src")]
+    sdk_root = Path(__file__).resolve().parents[1]
+    candidates = [sdk_root / "src", Path("/project/ev_sdk/src"), Path("/project/src")]
     for candidate in candidates:
         if (candidate / "face_attr").exists() and str(candidate) not in sys.path:
             sys.path.insert(0, str(candidate))
@@ -175,12 +181,12 @@ def _build_analyzer(facexformer_path: Optional[str], swinface_path: Optional[str
 
     if facexformer_path is None:
         facexformer_path = _optional_weight(
-            "facexformer/model.pt", project_root / "models" / "facexformer" / "model.pt"
+            "facexformer/model.pt", sdk_root / "model" / "facexformer" / "model.pt"
         )
     if swinface_path is None:
         swinface_path = _optional_weight(
             "swinface/checkpoint_step_79999_gpu_0.pt",
-            project_root / "models" / "swinface" / "checkpoint_step_79999_gpu_0.pt",
+            sdk_root / "model" / "swinface" / "checkpoint_step_79999_gpu_0.pt",
         )
     return AttributeAnalyzer(
         device=device,
@@ -196,8 +202,19 @@ def _optional_weight(relative_name: str, local_path: Path) -> str:
     return str(local_path)
 
 
-def _string_value(value: Any) -> str:
-    return UNKNOWN_ATTRIBUTE if value is None else str(value)
+def _race_value(value: Any) -> str:
+    """榜单 race 只接受 0-3（黄/白/黑/印第安）与 -1。
+
+    FaceXFormer 的 race 头是 5 类，比榜单多一类；越界的预测一律返回未知，
+    避免输出榜单未定义的 ``4``。
+    """
+    if value is None:
+        return UNKNOWN_ATTRIBUTE
+    try:
+        index = int(value)
+    except (TypeError, ValueError):
+        return UNKNOWN_ATTRIBUTE
+    return str(index) if 0 <= index <= 3 else UNKNOWN_ATTRIBUTE
 
 
 def _age_value(value: Any) -> str:

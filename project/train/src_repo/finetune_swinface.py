@@ -75,26 +75,13 @@ def train_epoch(model, loader, optimizer, device):
         valid_age = labels["age"] != MISSING_LABEL
         age_loss = masked_mean((outputs["Age"].reshape(-1) - labels["age"]) ** 2, valid_age)
 
-        # SwinFace has binary eyeglasses output; both ordinary glasses and sunglasses count as positive.
-        glasses_target = (labels["glasses"] > 0).long()
-        glasses_loss = masked_mean(
-            F.binary_cross_entropy_with_logits(
-                outputs["Eyeglasses"].reshape(-1), glasses_target.float(), reduction="none"
-            ),
-            labels["glasses"] != MISSING_LABEL,
-        )
-        hat_loss = masked_mean(
-            F.binary_cross_entropy_with_logits(
-                outputs["Wearing Hat"].reshape(-1), labels["hat"].float(), reduction="none"
-            ),
-            labels["hat"] != MISSING_LABEL,
-        )
-        whiskers_loss = masked_mean(
-            F.binary_cross_entropy_with_logits(
-                outputs["Mustache"].reshape(-1), labels["whiskers"].float(), reduction="none"
-            ),
-            labels["whiskers"] != MISSING_LABEL,
-        )
+        # SwinFace 的属性头是 2 分类输出（维度为 2），必须用交叉熵而不是 BCE。
+        # 榜单眼镜有 0/1/2 三类，而 SwinFace 只有「是否戴眼镜」，这里把 1/2 都当作正类。
+        glasses_target = labels["glasses"].clone()
+        glasses_target[glasses_target > 0] = 1
+        glasses_loss = masked_cross_entropy(outputs["Eyeglasses"], glasses_target)
+        hat_loss = masked_cross_entropy(outputs["Wearing Hat"], labels["hat"])
+        whiskers_loss = masked_cross_entropy(outputs["Mustache"], labels["whiskers"])
 
         # Dataset labels: 0=frown, 1=smile, 2=calm. Other (-1) is ignored.
         emotion_target = labels["emotion"].clone()

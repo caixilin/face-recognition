@@ -17,13 +17,13 @@ import cv2
 import numpy as np
 import torch
 
-# 项目根目录（src/face_attr/ 的上级的上级）
+# 项目根目录（src/face_attr/ 的上级的上级，即 ev_sdk/）
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
-# 默认权重路径
-DEFAULT_FACEXFORMER_WEIGHTS = _PROJECT_ROOT / "models" / "facexformer" / "model.pt"
+# 默认权重路径。SDK 权重目录名是单数 model/，与 train/models/ 不同。
+DEFAULT_FACEXFORMER_WEIGHTS = _PROJECT_ROOT / "model" / "facexformer" / "model.pt"
 DEFAULT_SWINFACE_WEIGHTS = (
-    _PROJECT_ROOT / "models" / "swinface" / "checkpoint_step_79999_gpu_0.pt"
+    _PROJECT_ROOT / "model" / "swinface" / "checkpoint_step_79999_gpu_0.pt"
 )
 
 # FaceXFormer 任务 token
@@ -41,6 +41,19 @@ SWINFACE_EXPRESSION_CLASSES = [
     "angry",
     "neutral",
 ]
+
+
+def _positive_class_probability(logits: torch.Tensor) -> float:
+    """把 SwinFace 的属性头输出转成「正类」概率。
+
+    SwinFace 的 CelebA 属性头（Smiling / Eyeglasses / Wearing Hat / Mustache /
+    No Beard）输出维度是 2，属于 2 分类而不是单 logit。这里取 softmax 的正类
+    概率；若某个头真的是单 logit，则退回到 sigmoid。
+    """
+    flat = logits.reshape(-1)
+    if logits.shape[-1] == 1:
+        return float(torch.sigmoid(flat[0]).item())
+    return float(torch.softmax(logits.reshape(-1, logits.shape[-1]), dim=-1)[0, 1].item())
 
 
 @dataclass
@@ -203,6 +216,9 @@ class AttributeAnalyzer:
             result["age"] = float(age_output.item())
         else:
             result["age"] = float(age_output.argmax(1).item())
+        # gender 头的类别顺序沿用 FaceXFormer 预训练权重（0=男、1=女）。
+        # 若改用 finetune_facexformer.py 微调出的权重，该脚本直接使用榜单标签
+        # （0=女、1=男）训练，此处必须改成 argmax==1 -> male。
         result["gender"] = "male" if gender_output.argmax(1).item() == 0 else "female"
         result["race"] = int(race_output.argmax(1).item())
 
@@ -220,33 +236,34 @@ class AttributeAnalyzer:
         result["expression"] = SWINFACE_EXPRESSION_CLASSES[
             int(output["Expression"].argmax(1).item())
         ]
-        result["smiling"] = float(output["Smiling"].sigmoid().item())
-        result["eyeglasses"] = float(output["Eyeglasses"].sigmoid().item())
-        result["wearing_hat"] = float(output["Wearing Hat"].sigmoid().item())
-        result["mustache"] = float(output["Mustache"].sigmoid().item())
-        result["no_beard"] = float(output["No Beard"].sigmoid().item())
+        # CelebA 属性头在 SwinFace 中是 2 分类输出（shape (B, 2)），
+        # 必须取正类概率，不能直接对 (B, 2) 张量做 sigmoid().item()。
+        result["smiling"] = _positive_class_probability(output["Smiling"])
+        result["eyeglasses"] = _positive_class_probability(output["Eyeglasses"])
+        result["wearing_hat"] = _positive_class_probability(output["Wearing Hat"])
+        result["mustache"] = _positive_class_probability(output["Mustache"])
+        result["no_beard"] = _positive_class_probability(output["No Beard"])
         return result
 
     @staticmethod
     def _headpose_to_orientation(euler: np.ndarray) -> str:
-        """根据欧拉角（弧度）判断人脸朝向。"""
+        """根据欧拉角（弧度）判断人脸朝向。
+
+        榜单只认三类：``front`` 正面（两眼可见）、``back`` 背面（两眼都不可见）、
+        ``other`` 其它（侧面等）。这里的阈值与微调脚本写入的 headpose 目标一致：
+        正面约 0 弧度、其它约 0.8 弧度、背面约 3.14 弧度。
+        """
         pitch, yaw, roll = euler
-        # 转换为角度
         yaw_deg = yaw * 180 / np.pi
         pitch_deg = pitch * 180 / np.pi
-        roll_deg = roll * 180 / np.pi
+        del roll  # 平面内旋转不影响是否能看到双眼，不参与朝向判断
 
-        if abs(yaw_deg) < 30 and abs(pitch_deg) < 30 and abs(roll_deg) < 30:
+        # 偏航角接近 180 度时人脸背对镜头，双眼均不可见。
+        if abs(yaw_deg) >= 90:
+            return "back"
+        if abs(yaw_deg) < 30 and abs(pitch_deg) < 30:
             return "front"
-        if yaw_deg > 30:
-            return "left"
-        if yaw_deg < -30:
-            return "right"
-        if pitch_deg > 30:
-            return "up"
-        if pitch_deg < -30:
-            return "down"
-        return "front"
+        return "other"
 
     # ------------------------------------------------------------------
     # 对外接口

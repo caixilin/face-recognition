@@ -61,7 +61,8 @@ def test_runtime_fuses_facexformer_and_swinface_outputs():
     assert objects[1]["toward"] == "front"
     assert objects[1]["gender"] == "1"
     assert objects[1]["emotion"] == "2"
-    assert "expression" not in objects[1]
+    # 榜单 objects 字段同时列出 expression 与 emotion，两个键都要输出。
+    assert objects[1]["expression"] == "2"
     assert facexformer.call_count == 1
     assert swinface.call_count == 1
 
@@ -77,7 +78,9 @@ def test_runtime_skips_swinface_for_non_front_face():
     objects = runtime.process(np.zeros((80, 80, 3), dtype=np.uint8))
 
     assert objects[0]["toward"] == "back"
-    assert objects[0]["gender"] == "1"
+    # 榜单示例中 toward=back 的目标所有属性均为 -1，且 ACC 规则 2 规定
+    # back 识别正确即判对，属性不参与判分。
+    assert objects[0]["gender"] == "-1"
     assert objects[0]["glasses"] == "-1"
     assert facexformer.call_count == 1
     assert swinface.call_count == 0

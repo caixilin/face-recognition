@@ -39,21 +39,30 @@ def init():
         boxes, probabilities = detector_model.detect(image_rgb)
         if boxes is None:
             return []
+        if probabilities is None:
+            probabilities = np.ones(len(boxes), dtype=np.float32)
+        # 榜单要求同一张图内每个人的 id 唯一，按置信度降序编号，保证顺序稳定。
+        order = sorted(range(len(boxes)), key=lambda index: -float(probabilities[index]))
         detections = []
-        for box, probability in zip(boxes, probabilities):
+        for target_index, index in enumerate(order, start=1):
+            box = boxes[index]
+            probability = float(probabilities[index])
             x_min, y_min, x_max, y_max = [int(value) for value in box]
+            head_width = x_max - x_min
+            head_height = y_max - y_min
+            person_x_min = max(0, x_min - head_width // 2)
+            person_y_min = max(0, y_min - head_height)
             detections.append(
                 FaceDetection(
-                    head_bbox=(x_min, y_min, x_max - x_min, y_max - y_min),
+                    head_bbox=(x_min, y_min, head_width, head_height),
                     person_bbox=(
-                        max(0, x_min - (x_max - x_min) // 2),
-                        max(0, y_min - (y_max - y_min)),
-                        min(image.shape[1], x_max + (x_max - x_min) // 2)
-                        - max(0, x_min - (x_max - x_min) // 2),
-                        min(image.shape[0], y_max + (y_max - y_min) * 2)
-                        - max(0, y_min - (y_max - y_min)),
+                        person_x_min,
+                        person_y_min,
+                        min(image.shape[1], x_max + head_width // 2) - person_x_min,
+                        min(image.shape[0], y_max + head_height * 2) - person_y_min,
                     ),
-                    confidence=float(probability),
+                    confidence=probability,
+                    target_id=str(target_index),
                 )
             )
         return detections

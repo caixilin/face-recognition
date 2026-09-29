@@ -74,6 +74,13 @@ def run_epoch(model, loader, optimizer, device):
         task = torch.full((images.shape[0],), 4, device=device, dtype=torch.long)
         _, _, _, _, _, gender_logits, race_logits, _ = model(images, model_labels, task)
 
+        # 注意：这里把数据集的 gender/race 标签直接当作分类目标训练，
+        # 因此训练完成后的权重必须与 model_api.py 的解码保持一致：
+        #   gender 0=女、1=男（榜单定义）；race 0-3（榜单定义，头是 5 类，多出的一类不会被预测到）。
+        # 如果沿用原始预训练权重（当前 ev_sdk/model/facexformer/model.pt 与 model_original.pt 完全相同），
+        # 就需要按原始模型的类别顺序解码，不能直接套用本脚本的标签顺序。
+        # toward 的欧拉角目标同样必须与 face_attr/analyzer._headpose_to_orientation 的阈值一致：
+        #   front→(0, 0)、back→yaw≈3.14、other→yaw≈0.8 且 pitch≈0.8。
         gender_loss = masked_cross_entropy(gender_logits, labels["gender"])
         race_loss = masked_cross_entropy(race_logits, labels["race"])
         loss = gender_loss + race_loss
