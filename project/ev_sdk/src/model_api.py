@@ -234,10 +234,10 @@ def _gender_value(value: Any) -> str:
 
 
 def _toward_value(value: Any) -> str:
-    if value == "front":
-        return "front"
-    if value in {"back", "left", "right", "up", "down"}:
-        return "back" if value == "back" else "other"
+    if value in {"front", "back", "other"}:
+        return value
+    if value in {"left", "right", "up", "down"}:
+        return "other"
     return UNKNOWN_ATTRIBUTE
 
 

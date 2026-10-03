@@ -263,7 +263,24 @@ class FaceXFormer(nn.Module):
                 image_embeddings=fused_states,
                 image_pe=image_pe
             )
-        
+
+        # tasks=None 表示"返回值全都要"。
+        # 注意 face_decoder 在上面已经无条件算完了全部 8 个头（含 224x224 的分割头），
+        # 下面那些 tasks == N 的切片只决定返回哪几个，**不会**省掉任何计算。
+        # 所以需要多组输出时应当传 None 只跑一次前向，而不是按 task 反复调用
+        # （那样每调一次就把整个解码器重算一遍）。
+        if tasks is None:
+            return (
+                landmark_output,
+                headpose_output,
+                attribute_output,
+                visibility_output,
+                age_output,
+                gender_output,
+                race_output,
+                seg_output,
+            )
+
         segmentation_indices = (tasks == 0)
         seg_output = seg_output[segmentation_indices]
         

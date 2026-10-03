@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 
 SDK_SRC = Path(__file__).parents[1] / "project" / "ev_sdk" / "src"
@@ -93,7 +94,7 @@ def test_gender_value_uses_rank_gender_encoding():
     assert _gender_value("1") == "1"
 
 
-def test_process_image_returns_extrememart_json(monkeypatch):
+def _load_ji(monkeypatch):
     torch_stub = type(
         "TorchStub",
         (),
@@ -104,6 +105,39 @@ def test_process_image_returns_extrememart_json(monkeypatch):
     assert spec is not None and spec.loader is not None
     ji = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(ji)
+    return ji
+
+
+@pytest.mark.parametrize(
+    "name,finetuned_name",
+    [
+        ("facexformer/model.pt", "facexformer_finetuned.pt"),
+        ("swinface/checkpoint_step_79999_gpu_0.pt", "swinface_finetuned.pt"),
+    ],
+)
+def test_sdk_prefers_mounted_finetuned_weights(monkeypatch, name, finetuned_name):
+    ji = _load_ji(monkeypatch)
+    mounted_path = Path("/project/train/models") / finetuned_name
+    sdk_path = Path("/project/ev_sdk/model") / name
+    monkeypatch.setattr(Path, "is_file", lambda path: path in (mounted_path, sdk_path))
+    assert ji._find_weight(name) == str(mounted_path)
+
+    # 未选中微调产物时，仍可使用已有的 SDK 权重。
+    monkeypatch.setattr(Path, "is_file", lambda path: path == sdk_path)
+    assert ji._find_weight(name) == str(sdk_path)
+
+    local_path = SDK_SRC / ".." / "model" / name
+    local_path = local_path.resolve()
+    monkeypatch.setattr(Path, "is_file", lambda path: path == local_path)
+    assert ji._find_weight(name) == str(local_path)
+
+    monkeypatch.setattr(Path, "is_file", lambda path: False)
+    with pytest.raises(FileNotFoundError, match=finetuned_name):
+        ji._find_weight(name)
+
+
+def test_process_image_returns_extrememart_json(monkeypatch):
+    ji = _load_ji(monkeypatch)
 
     runtime = FaceAttributeRuntime(
         detector=lambda image: [FaceDetection(head_bbox=(1, 2, 3, 4))]

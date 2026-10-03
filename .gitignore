@@ -2,28 +2,30 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
-.venv/
+.venv*/
+.pytest_cache/
 venv/
 envs/
 *.conda/
 
-# 模型权重与数据（不入库）
-# 注意：必须用 ** 递归匹配，权重实际位于 models/<子目录>/ 下
-models/**/*.pt
-models/**/*.pth
-models/**/*.ckpt
-models/**/*.onnx
-data/**
+# 模型权重（任何目录均不入库，本地保留）
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.safetensors
 
-# SDK 部署权重（过大，不入库，本地保留）
-project/ev_sdk/model/**/*.pt
-project/ev_sdk/model/**/*.pth
+# 本地数据（保留目录占位文件）
+data/**
+!data/.gitkeep
 
 # 训练产物（不入库）
 project/train/models/**
 project/train/log/**
 project/train/result-graphs/**
 !project/train/models/.gitkeep
+!project/train/models/**/
+!project/train/models/**/.gitkeep
 !project/train/log/.gitkeep
 !project/train/result-graphs/.gitkeep
 

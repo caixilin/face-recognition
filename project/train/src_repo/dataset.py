@@ -8,6 +8,7 @@ attributes/attribute/name+value 结构，也兼容直接属性节点。
 from __future__ import annotations
 
 import os
+import random
 from pathlib import Path
 from typing import Callable, Optional
 import xml.etree.ElementTree as ET
@@ -74,6 +75,9 @@ class FaceAttributeDataset(Dataset):
         self._bad_image_count = 0
 
         self.samples: list[tuple[str, dict]] = []
+        # 与 samples 一一对应的来源标记，用于多数据集合并时做分层抽样。
+        self.sources: list[str] = []
+        self.source_stats: dict = {}
         self._load_samples()
 
     def _build_image_index(self) -> dict:
@@ -98,12 +102,19 @@ class FaceAttributeDataset(Dataset):
             raise FileNotFoundError(f"数据集目录不存在: {self.data_dir}")
 
         xml_paths = sorted(self.label_dir.rglob("*.xml")) if self.label_dir.exists() else []
+        xml_root = self.label_dir
         if not xml_paths:
             xml_paths = sorted(self.data_dir.rglob("*.xml"))
+            xml_root = self.data_dir
         self.logger(f"发现标注文件: {len(xml_paths)} 个，开始解析 ...")
 
         skipped = 0
         total_xml = len(xml_paths)
+        # 多个数据集同时挂载时 /home/data 下会同时存在多份标注。这里按顶层子目录
+        # 分组统计，用来确认「每份数据是否都被读到」「各份的属性分布是否一致」
+        # 「抽样后是否覆盖到每一份」，这些是合并训练能不能成立的前提。
+        stats: dict = {}
+        image_paths: set = set()
         for position, xml_path in enumerate(xml_paths, start=1):
             if position % 1000 == 0 or position == total_xml:
                 self.logger(
@@ -119,11 +130,111 @@ class FaceAttributeDataset(Dataset):
             if image_path is None:
                 skipped += 1
                 continue
+            group = self._source_group(xml_path, xml_root)
+            stat = stats.setdefault(group, self._new_source_stat())
+            stat["xml"] += 1
+            image_paths.add(str(image_path))
             for label in self._parse_xml(root):
                 self.samples.append((str(image_path), label))
+                self.sources.append(group)
+                stat["target"] += 1
+                stat["toward"][label["toward"] + 1] += 1
+                stat["gender"][label["gender"] + 1] += 1
+                stat["race"][label["race"] + 1] += 1
+
+        self.source_stats = stats
+        self._log_source_breakdown(stats, len(image_paths))
 
         if len(self.samples) == 0:
             raise RuntimeError(f"数据集为空: {self.data_dir}")
+
+    @staticmethod
+    def _new_source_stat() -> dict:
+        # 计数数组比类别数多 1，留给「缺失」(-1)。
+        return {
+            "xml": 0,
+            "target": 0,
+            "toward": [0] * (CLASS_COUNTS["toward"] + 1),
+            "gender": [0] * (CLASS_COUNTS["gender"] + 1),
+            "race": [0] * (CLASS_COUNTS["race"] + 1),
+        }
+
+    @staticmethod
+    def _source_group(xml_path: Path, xml_root: Path) -> str:
+        """判断该 XML 属于哪一份数据：取相对根目录的第一级子目录名。"""
+        try:
+            relative = xml_path.relative_to(xml_root)
+        except ValueError:
+            return xml_path.parent.name or "(根目录)"
+        return relative.parts[0] if len(relative.parts) > 1 else "(根目录)"
+
+    def _log_source_breakdown(self, stats: dict, image_count: int) -> None:
+        """打印各来源的样本量与属性分布，用于核对合并训练是否正确。"""
+        if not stats:
+            return
+        self.logger(f"数据集来源分布: {len(stats)} 组，{image_count} 张不同图片")
+        for group, stat in sorted(stats.items(), key=lambda item: -item[1]["target"]):
+            self.logger(
+                f"  {group}: XML {stat['xml']} 个，目标 {stat['target']} 个 | "
+                f"toward {self._format_counts(('缺失', 'front', 'back', 'other'), stat['toward'])} | "
+                f"gender {self._format_counts(('缺失', '0', '1'), stat['gender'])} | "
+                f"race {self._format_counts(('缺失', '0', '1', '2', '3'), stat['race'])}"
+            )
+
+    @staticmethod
+    def _format_counts(names: tuple, counts: list) -> str:
+        # 注意计数数组的下标是「标签值 + 1」，所以下标 0 是缺失而不是第一个类别。
+        # 逐对打印名字和数字，避免表头顺序和实际下标错位。
+        return "/".join(f"{name}={count}" for name, count in zip(names, counts))
+
+    def select_subset(self, max_samples: int, seed: int = 42) -> None:
+        """按来源等量分层抽样，原地把 samples/sources 缩小到 max_samples 个。
+
+        为什么不能直接切前 N 个：samples 是按 XML 路径 sorted() 得到的，多个数据集
+        同时挂载时会退化成「只用了路径最靠前的那一份」。这里按来源分组、每份抽相同
+        数量，保证每份数据都被覆盖；最后再整体打乱，避免同来源样本扎堆。
+        """
+        total = len(self.samples)
+        if max_samples <= 0 or max_samples >= total:
+            return
+
+        groups: dict = {}
+        for index, source in enumerate(self.sources):
+            groups.setdefault(source, []).append(index)
+
+        rng = random.Random(seed)
+        quota, remainder = divmod(max_samples, len(groups))
+        ordered = sorted(groups.items(), key=lambda item: -len(item[1]))
+        chosen: list = []
+        unused = 0
+        for position, (_source, indices) in enumerate(ordered):
+            want = quota + (1 if position < remainder else 0)
+            take = min(want, len(indices))
+            unused += want - take
+            chosen.extend(rng.sample(indices, take))
+
+        # 某份数据样本不够配额时，把剩下的名额补给还有富余的那份，尽量抽满。
+        if unused > 0:
+            taken = set(chosen)
+            spare = [index for index in range(total) if index not in taken]
+            rng.shuffle(spare)
+            chosen.extend(spare[:unused])
+
+        rng.shuffle(chosen)
+        self.samples = [self.samples[index] for index in chosen]
+        self.sources = [self.sources[index] for index in chosen]
+
+        per_source: dict = {}
+        for source in self.sources:
+            per_source[source] = per_source.get(source, 0) + 1
+        self.logger(
+            f"--max_samples 生效: {total} -> {len(self.samples)} 个样本"
+            f"（按 {len(groups)} 份数据等量分层抽样，已打乱）"
+        )
+        self.logger(
+            "  抽样后各来源: "
+            + "，".join(f"{source} {count} 个" for source, count in sorted(per_source.items()))
+        )
 
     def _image_path(self, xml_path: Path, root: ET.Element) -> Optional[Path]:
         """根据 XML 中的 filename 定位图片，找不到时回退到同名文件。"""

@@ -82,6 +82,7 @@ class AttributeAnalyzer:
         self.device = torch.device(device)
         self._facexformer = None
         self._swinface = None
+        self._facexformer_gender_classes = ("male", "female")
         self._facexformer_weights = (
             Path(facexformer_weights)
             if facexformer_weights
@@ -105,6 +106,17 @@ class AttributeAnalyzer:
 
         model = FaceXFormer().to(self.device)
         checkpoint = torch.load(self._facexformer_weights, map_location=self.device)
+        # 新微调权重会记录类别顺序；旧原始权重没有元数据，继续沿用 0=男/1=女。
+        # 旧版微调产物没有元数据，可显式设置 FACEXFORMER_GENDER_ORDER=female,male。
+        gender_classes = checkpoint.get("gender_classes", ("male", "female"))
+        override = os.environ.get("FACEXFORMER_GENDER_ORDER")
+        if override is not None:
+            gender_classes = [name.strip() for name in override.split(",")]
+        if not isinstance(gender_classes, (list, tuple)) or tuple(gender_classes) not in (
+            ("male", "female"), ("female", "male")
+        ):
+            raise ValueError("FaceXFormer gender_classes 必须为 male,female 或 female,male")
+        self._facexformer_gender_classes = tuple(gender_classes)
         model.load_state_dict(checkpoint["state_dict_backbone"])
         model.eval()
         return model
@@ -182,44 +194,29 @@ class AttributeAnalyzer:
     def _run_facexformer(self, face_crop: np.ndarray) -> dict:
         """运行 FaceXFormer，返回朝向、年龄、性别、种族。"""
         image = self._preprocess_facexformer(face_crop).to(self.device)
-        labels = {
-            "segmentation": torch.zeros([224, 224]),
-            "lnm_seg": torch.zeros([5, 2]),
-            "landmark": torch.zeros([68, 2]),
-            "headpose": torch.zeros([3]),
-            "attribute": torch.zeros([40]),
-            "a_g_e": torch.zeros([3]),
-            "visibility": torch.zeros([29]),
-        }
-        for k in labels:
-            labels[k] = labels[k].unsqueeze(0).to(self.device)
 
         result: dict = {}
 
-        # 朝向
-        task = _TASK_HEADPOSE.to(self.device)
-        data = {"image": image, "label": labels, "task": task}
-        _, headpose_output, _, _, _, _, _, _ = self._facexformer(
-            data["image"], data["label"], data["task"]
+        # FaceXFormer.forward 内部会无条件算出全部 8 个头，task 只对返回值做切片，
+        # 所以同一张脸跑一次前向就能同时拿到朝向和年龄/性别/种族。
+        # 原来按 task 调两次，等于把整个解码器算两遍（推理耗时也接近 2 倍，
+        # 而耗时直接计入榜单的 20% 性能分）。labels 参数在 forward 里从未被使用。
+        _, headpose_output, _, _, age_output, gender_output, race_output, _ = self._facexformer(
+            image, None, None
         )
+
+        # 朝向
         result["orientation"] = self._headpose_to_orientation(
             headpose_output[0].cpu().numpy()
         )
 
         # 年龄 / 性别 / 种族
-        task = _TASK_AGE_GENDER_RACE.to(self.device)
-        data = {"image": image, "label": labels, "task": task}
-        _, _, _, _, age_output, gender_output, race_output, _ = self._facexformer(
-            data["image"], data["label"], data["task"]
-        )
         if age_output.numel() == 1:
             result["age"] = float(age_output.item())
         else:
             result["age"] = float(age_output.argmax(1).item())
-        # gender 头的类别顺序沿用 FaceXFormer 预训练权重（0=男、1=女）。
-        # 若改用 finetune_facexformer.py 微调出的权重，该脚本直接使用榜单标签
-        # （0=女、1=男）训练，此处必须改成 argmax==1 -> male。
-        result["gender"] = "male" if gender_output.argmax(1).item() == 0 else "female"
+        gender_index = int(gender_output.argmax(1).item())
+        result["gender"] = self._facexformer_gender_classes[gender_index]
         result["race"] = int(race_output.argmax(1).item())
 
         return result

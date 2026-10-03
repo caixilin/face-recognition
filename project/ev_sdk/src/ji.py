@@ -1,7 +1,8 @@
 """极市平台模型榜 Python SDK 入口。
 
 平台先调用 ``init()``，再将 BGR 图片逐张传给 ``process_image()``。
-模型权重统一从 ``/project/ev_sdk/model/`` 加载。
+优先加载平台挂载在 ``/project/train/models/`` 的微调权重，
+未挂载时回退到 ``/project/ev_sdk/model/`` 的 SDK 权重。
 """
 
 from __future__ import annotations
@@ -20,11 +21,20 @@ from model_api import (
 
 
 def _find_weight(name: str) -> str:
+    finetuned_names = {
+        "facexformer/model.pt": "facexformer_finetuned.pt",
+        "swinface/checkpoint_step_79999_gpu_0.pt": "swinface_finetuned.pt",
+    }
+    candidates = []
+    if name in finetuned_names:
+        candidates.append(Path("/project/train/models") / finetuned_names[name])
     for root in (Path("/project/ev_sdk/model"), Path(__file__).resolve().parents[1] / "model"):
-        path = root / name
-        if path.exists():
+        candidates.append(root / name)
+    for path in candidates:
+        if path.is_file():
+            print(f"SDK 加载权重: {path}", flush=True)
             return str(path)
-    raise FileNotFoundError(f"模型权重不存在: {name}")
+    raise FileNotFoundError(f"模型权重不存在: {name}；已检查: {', '.join(map(str, candidates))}")
 
 
 def init():
