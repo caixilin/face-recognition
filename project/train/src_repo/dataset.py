@@ -260,14 +260,14 @@ class FaceAttributeDataset(Dataset):
         return None
 
     @staticmethod
-    def _value(root: ET.Element, name: str) -> str | None:
+    def _value(root: ET.Element, name: str, recursive: bool = True) -> str | None:
         for attribute in root.findall("./attributes/attribute"):
             if (attribute.findtext("name") or "").strip().lower() == name:
                 value = attribute.findtext("value")
                 if value is not None:
                     return value.strip()
         node = root.find(name)
-        if node is None:
+        if node is None and recursive:
             node = root.find(f".//{name}")
         return node.text.strip() if node is not None and node.text else None
 
@@ -279,7 +279,8 @@ class FaceAttributeDataset(Dataset):
             if name not in {"head", "face", "head_shoulder"}:
                 continue
             values = {
-                key: self._value(obj, key) or self._value(root, key)
+                # 根节点只允许图片级属性，不能从另一个 object 借用标签。
+                key: self._value(obj, key) or self._value(root, key, recursive=False)
                 for key in ATTRIBUTE_NAMES
             }
             try:

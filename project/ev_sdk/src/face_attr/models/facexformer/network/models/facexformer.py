@@ -91,6 +91,7 @@ class FaceDecoder(nn.Module):
         self,
         image_embeddings: torch.Tensor,
         image_pe: torch.Tensor,
+        sdk_only: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         output_tokens = torch.cat([self.landmarks_token.weight, self.pose_token.weight, self.attribute_token.weight, self.visibility_token.weight, self.age_token.weight, self.gender_token.weight, self.race_token.weight,self.mask_tokens.weight], dim=0) 
         tokens = output_tokens.unsqueeze(0).expand(image_embeddings.size(0), -1, -1)
@@ -100,6 +101,17 @@ class FaceDecoder(nn.Module):
         b, c, h, w = src.shape
 
         hs, src = self.transformer(src, pos_src, tokens)
+
+        if sdk_only:
+            # Keep every token in the shared transformer: removing tokens would
+            # change attention and the predictions of existing checkpoints.
+            # Only skip independent output heads unused by the SDK.
+            return (
+                None, self.pose_prediction_head(hs[:, 1, :]), None, None,
+                self.age_prediction_head(hs[:, 4, :]),
+                self.gender_prediction_head(hs[:, 5, :]),
+                self.race_prediction_head(hs[:, 6, :]), None,
+            )
     
         landmarks_token_out = hs[:, 0, :]
         pose_token_out =  hs[:, 1, :]
@@ -236,7 +248,7 @@ class FaceXFormer(nn.Module):
             self.multi_scale_features.append(output.permute(0,3,1,2).contiguous()) 
         return hook
 
-    def forward(self, x, labels, tasks):
+    def forward(self, x, labels, tasks, sdk_only=False):
         self.multi_scale_features.clear()
         
         _,_,h,w = x.shape
@@ -261,15 +273,16 @@ class FaceXFormer(nn.Module):
         
         landmark_output, headpose_output, attribute_output, visibility_output, age_output, gender_output, race_output, seg_output = self.face_decoder(
                 image_embeddings=fused_states,
-                image_pe=image_pe
+                image_pe=image_pe,
+                sdk_only=sdk_only,
             )
 
         # tasks=None 表示"返回值全都要"。
-        # 注意 face_decoder 在上面已经无条件算完了全部 8 个头（含 224x224 的分割头），
+        # 默认训练路径仍计算全部 8 个头；sdk_only 跳过独立的无用输出分支。
         # 下面那些 tasks == N 的切片只决定返回哪几个，**不会**省掉任何计算。
         # 所以需要多组输出时应当传 None 只跑一次前向，而不是按 task 反复调用
         # （那样每调一次就把整个解码器重算一遍）。
-        if tasks is None:
+        if tasks is None or sdk_only:
             return (
                 landmark_output,
                 headpose_output,

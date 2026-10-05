@@ -43,7 +43,7 @@ SWINFACE_EXPRESSION_CLASSES = [
 ]
 
 
-def _positive_class_probability(logits: torch.Tensor) -> float:
+def _positive_class_tensor(logits: torch.Tensor) -> torch.Tensor:
     """把 SwinFace 的属性头输出转成「正类」概率。
 
     SwinFace 的 CelebA 属性头（Smiling / Eyeglasses / Wearing Hat / Mustache /
@@ -52,8 +52,19 @@ def _positive_class_probability(logits: torch.Tensor) -> float:
     """
     flat = logits.reshape(-1)
     if logits.shape[-1] == 1:
-        return float(torch.sigmoid(flat[0]).item())
-    return float(torch.softmax(logits.reshape(-1, logits.shape[-1]), dim=-1)[0, 1].item())
+        return torch.sigmoid(flat[0])
+    return torch.softmax(logits.reshape(-1, logits.shape[-1]), dim=-1)[0, 1]
+
+
+def _positive_class_probability(logits: torch.Tensor) -> float:
+    return float(_positive_class_tensor(logits).item())
+
+
+def _positive_class_batch(logits: torch.Tensor) -> torch.Tensor:
+    rows = logits.reshape(-1, logits.shape[-1])
+    if rows.shape[1] == 1:
+        return torch.sigmoid(rows[:, 0])
+    return torch.softmax(rows, dim=-1)[:, 1]
 
 
 @dataclass
@@ -106,9 +117,17 @@ class AttributeAnalyzer:
 
         model = FaceXFormer().to(self.device)
         checkpoint = torch.load(self._facexformer_weights, map_location=self.device)
-        # 新微调权重会记录类别顺序；旧原始权重没有元数据，继续沿用 0=男/1=女。
-        # 旧版微调产物没有元数据，可显式设置 FACEXFORMER_GENDER_ORDER=female,male。
-        gender_classes = checkpoint.get("gender_classes", ("male", "female"))
+        if "toward_classes" in checkpoint:
+            if checkpoint["toward_classes"] != ["front", "back", "other"]:
+                raise ValueError("无效 toward_classes")
+            model.toward_classifier = torch.nn.Linear(3, 3).to(self.device)
+        # 本项目旧微调产物按 0=女/1=男训练，但未记录类别元数据。
+        # 仅识别其约定文件名；原始权重保留 0=男/1=女，显式元数据优先。
+        default_gender_classes = (
+            ("female", "male") if self._facexformer_weights.name == "facexformer_finetuned.pt"
+            else ("male", "female")
+        )
+        gender_classes = checkpoint.get("gender_classes", default_gender_classes)
         override = os.environ.get("FACEXFORMER_GENDER_ORDER")
         if override is not None:
             gender_classes = [name.strip() for name in override.split(",")]
@@ -117,6 +136,7 @@ class AttributeAnalyzer:
         ):
             raise ValueError("FaceXFormer gender_classes 必须为 male,female 或 female,male")
         self._facexformer_gender_classes = tuple(gender_classes)
+        print(f"SDK 性别类别顺序: {list(gender_classes)} 权重: {self._facexformer_weights}", flush=True)
         model.load_state_dict(checkpoint["state_dict_backbone"])
         model.eval()
         return model
@@ -133,11 +153,24 @@ class AttributeAnalyzer:
         cfg = SwinFaceCfg()
         model = build_model(cfg).to(self.device)
         checkpoint = torch.load(self._swinface_weights, map_location=self.device)
+        has_mask_head = any("mask_head" in key for key in checkpoint.get("state_dict_om", {}))
+        print(
+            "SDK 口罩权重检查: "
+            f"platform_heads={checkpoint.get('platform_heads')} "
+            f"mask_classes={checkpoint.get('mask_classes')} "
+            f"has_mask_head={has_mask_head} 权重={self._swinface_weights}",
+            flush=True,
+        )
+        if checkpoint.get("platform_heads") == 1:
+            if checkpoint.get("glasses_classes") != ["no_glasses", "glasses", "sunglasses"] or checkpoint.get("mask_classes") != ["no_mask", "mask"]:
+                raise ValueError("无效平台眼镜/口罩类别顺序")
+            model.om.enable_platform_heads()
         model.backbone.load_state_dict(checkpoint["state_dict_backbone"])
         model.fam.load_state_dict(checkpoint["state_dict_fam"])
         model.tss.load_state_dict(checkpoint["state_dict_tss"])
         model.om.load_state_dict(checkpoint["state_dict_om"])
         model.eval()
+        print(f"SDK SwinFace 精简推理: 保留分支={model.om.sdk_branches()} / 总分支=11", flush=True)
         return model
 
     def _ensure_models(self) -> None:
@@ -193,61 +226,88 @@ class AttributeAnalyzer:
     @torch.no_grad()
     def _run_facexformer(self, face_crop: np.ndarray) -> dict:
         """运行 FaceXFormer，返回朝向、年龄、性别、种族。"""
-        image = self._preprocess_facexformer(face_crop).to(self.device)
+        return self._run_facexformer_batch([face_crop])[0]
 
-        result: dict = {}
+    @torch.no_grad()
+    def _run_facexformer_batch(self, face_crops: list) -> list:
+        """保持逐图预处理，将同帧目标合并为一次前向和结果传输。"""
+        if not face_crops:
+            return []
+        image = torch.cat([self._preprocess_facexformer(crop) for crop in face_crops], dim=0).to(self.device)
+        batch_size = len(face_crops)
 
-        # FaceXFormer.forward 内部会无条件算出全部 8 个头，task 只对返回值做切片，
-        # 所以同一张脸跑一次前向就能同时拿到朝向和年龄/性别/种族。
-        # 原来按 task 调两次，等于把整个解码器算两遍（推理耗时也接近 2 倍，
-        # 而耗时直接计入榜单的 20% 性能分）。labels 参数在 forward 里从未被使用。
+        # SDK 只执行朝向、年龄、性别、人种输出头。共享注意力和权重不变。
         _, headpose_output, _, _, age_output, gender_output, race_output, _ = self._facexformer(
-            image, None, None
+            image, None, None, sdk_only=True
         )
 
-        # 朝向
-        result["orientation"] = self._headpose_to_orientation(
-            headpose_output[0].cpu().numpy()
-        )
-
-        # 年龄 / 性别 / 种族
-        if age_output.numel() == 1:
-            result["age"] = float(age_output.item())
-        else:
-            result["age"] = float(age_output.argmax(1).item())
-        gender_index = int(gender_output.argmax(1).item())
-        result["gender"] = self._facexformer_gender_classes[gender_index]
-        result["race"] = int(race_output.argmax(1).item())
-
-        return result
+        age_rows = age_output.reshape(batch_size, -1)
+        age = age_rows[:, 0] if age_rows.shape[1] == 1 else age_rows.argmax(1)
+        values = [headpose_output, age.unsqueeze(1), gender_output.argmax(1).unsqueeze(1),
+                  race_output.argmax(1).unsqueeze(1)]
+        has_classifier = hasattr(self._facexformer, "toward_classifier")
+        if has_classifier:
+            values.append(self._facexformer.toward_classifier(headpose_output).argmax(1).unsqueeze(1))
+        # One device-to-host copy; keep the original pose dtype for angle thresholds.
+        packed = torch.cat(values, dim=1).cpu().numpy()
+        results = []
+        for row in packed:
+            orientation = (["front", "back", "other"][int(row[6])] if has_classifier else
+                           self._headpose_to_orientation(row[:3]))
+            results.append({
+                "orientation": orientation,
+                "age": float(row[3]),
+                "gender": self._facexformer_gender_classes[int(row[4])],
+                "race": int(row[5]),
+            })
+        return results
 
     @torch.no_grad()
     def _run_swinface(self, face_crop: np.ndarray) -> dict:
         """运行 SwinFace，返回年龄、表情及 CelebA 属性。"""
-        img = self._preprocess_swinface(face_crop).to(self.device)
-        output = self._swinface(img)
+        return self._run_swinface_batch([face_crop])[0]
 
-        result: dict = {}
-        age_output = output["Age"]
-        result["age"] = float(age_output.reshape(-1)[0].item())
-        result["expression"] = SWINFACE_EXPRESSION_CLASSES[
-            int(output["Expression"].argmax(1).item())
-        ]
+    @torch.no_grad()
+    def _run_swinface_batch(self, face_crops: list) -> list:
+        if not face_crops:
+            return []
+        img = torch.cat([self._preprocess_swinface(crop) for crop in face_crops], dim=0).to(self.device)
+        output = self._swinface(img, sdk_only=True)
+
+        values = {
+            "age": output["Age"].reshape(-1),
+            "expression": output["Expression"].argmax(1),
+            "smiling": _positive_class_batch(output["Smiling"]),
+        }
         # CelebA 属性头在 SwinFace 中是 2 分类输出（shape (B, 2)），
         # 必须取正类概率，不能直接对 (B, 2) 张量做 sigmoid().item()。
-        result["smiling"] = _positive_class_probability(output["Smiling"])
-        result["eyeglasses"] = _positive_class_probability(output["Eyeglasses"])
-        result["wearing_hat"] = _positive_class_probability(output["Wearing Hat"])
-        result["mustache"] = _positive_class_probability(output["Mustache"])
-        result["no_beard"] = _positive_class_probability(output["No Beard"])
-        return result
+        if output["Eyeglasses"].shape[-1] == 3:
+            values["glasses_class"] = output["Eyeglasses"].argmax(1)
+        else:
+            values["eyeglasses"] = _positive_class_batch(output["Eyeglasses"])
+        if "Mask" in output:
+            values["mask"] = _positive_class_batch(output["Mask"])
+        values["wearing_hat"] = _positive_class_batch(output["Wearing Hat"])
+        values["mustache"] = _positive_class_batch(output["Mustache"])
+        values["no_beard"] = _positive_class_batch(output["No Beard"])
+        # Preserve all decoded fields, but transfer their scalar values together.
+        packed = torch.stack(list(values.values()), dim=1).cpu().tolist()
+        results = []
+        for row in packed:
+            result = dict(zip(values, row))
+            result["expression"] = SWINFACE_EXPRESSION_CLASSES[int(result["expression"])]
+            if "glasses_class" in result:
+                result["glasses_class"] = int(result["glasses_class"])
+            results.append(result)
+        return results
 
     @staticmethod
     def _headpose_to_orientation(euler: np.ndarray) -> str:
         """根据欧拉角（弧度）判断人脸朝向。
 
         榜单只认三类：``front`` 正面（两眼可见）、``back`` 背面（两眼都不可见）、
-        ``other`` 其它（侧面等）。这里的阈值与微调脚本写入的 headpose 目标一致：
+        ``other`` 其它（侧面等）。角度阈值是当前实现的近似，不是官方双眼可见规则；
+        训练验证使用同一阈值，但真实朝向效果仍需标注数据验证。训练目标为：
         正面约 0 弧度、其它约 0.8 弧度、背面约 3.14 弧度。
         """
         pitch, yaw, roll = euler

@@ -196,10 +196,15 @@ class FeatureAttentionModule(torch.nn.Module):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
 
-    def forward(self, x):
+    def forward(self, x, branches=None):
 
         if self.conv_shared:
             x = self.conv(x)
+
+        if branches is not None:
+            # Each attention branch is independent; retain its original index
+            # so the existing checkpoint and output-head mapping stay intact.
+            return {i: self.nets[i](x) for i in branches}
 
         outputs = []
         for net in self.nets:
@@ -244,7 +249,10 @@ class TaskSpecificSubnets(torch.nn.Module):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
 
-    def forward(self, x):
+    def forward(self, x, branches=None):
+
+        if branches is not None:
+            return {i: self.nets[i](x[i]) for i in branches}
 
         outputs = []
         for i in range(self.branch_num):
@@ -256,6 +264,18 @@ class TaskSpecificSubnets(torch.nn.Module):
         return outputs
 
 class OutputModule(torch.nn.Module):
+    # (original branch, head within that branch); these are all fields decoded
+    # by AttributeAnalyzer, including its legacy smiling/no_beard results.
+    SDK_HEADS = {
+        "Age": (1, 0),
+        "Expression": (2, 0),
+        "Smiling": (2, 1),
+        "Wearing Hat": (4, 9),
+        "Eyeglasses": (5, 3),
+        "Mustache": (8, 3),
+        "No Beard": (8, 5),
+    }
+
     def __init__(self, feature_dim=512, output_type="Dict"):
         super().__init__()
         self.output_sizes = [[2],
@@ -294,6 +314,22 @@ class OutputModule(torch.nn.Module):
     def set_output_type(self, output_type):
         self.output_type = output_type
 
+    def enable_platform_heads(self):
+        """Extend old checkpoints with glasses 0/1/2 and a supervised mask head."""
+        if hasattr(self, 'mask_head'):
+            return
+        eye_index = sum(len(group) for group in self.output_sizes[:5]) + 3
+        old = self.output_fcs[eye_index]
+        new = nn.Linear(old.in_features, 3).to(device=old.weight.device, dtype=old.weight.dtype)
+        self._init_weights(new)
+        with torch.no_grad():
+            new.weight[:2].copy_(old.weight)
+            new.bias[:2].copy_(old.bias)
+        self.output_fcs[eye_index] = new
+        self.output_sizes[5][3] = 3
+        self.mask_head = nn.Linear(old.in_features, 2).to(device=old.weight.device, dtype=old.weight.dtype)
+        self._init_weights(self.mask_head)
+
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
             trunc_normal_(m.weight, std=.02)
@@ -303,7 +339,22 @@ class OutputModule(torch.nn.Module):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
 
-    def forward(self, x, embedding):
+    def sdk_branches(self):
+        branches = {branch for branch, _ in self.SDK_HEADS.values()}
+        if hasattr(self, "mask_head"):
+            branches.add(6)
+        return sorted(branches)
+
+    def forward(self, x, embedding, sdk_only=False):
+
+        if sdk_only:
+            result = {}
+            for name, (branch, offset) in self.SDK_HEADS.items():
+                index = sum(len(group) for group in self.output_sizes[:branch]) + offset
+                result[name] = self.output_fcs[index](x[branch])
+            if hasattr(self, "mask_head"):
+                result["Mask"] = self.mask_head(x[6])
+            return result
 
         outputs = []
 
@@ -343,6 +394,9 @@ class OutputModule(torch.nn.Module):
         for j in range(43):
             result[self.task_names[j]] = outputs[j]
 
+        if hasattr(self, 'mask_head'):
+            result['Mask'] = self.mask_head(x[6])
+
         if self.output_type == "Dict":
             return result
         elif self.output_type == "List":
@@ -374,7 +428,7 @@ class ModelBox(torch.nn.Module):
             self.om.set_output_type(self.output_type)
 
 
-    def forward(self, x):
+    def forward(self, x, sdk_only=False):
 
         local_features, global_features, embedding = self.backbone(x)
 
@@ -384,6 +438,14 @@ class ModelBox(torch.nn.Module):
             x = global_features
         elif self.feature == "local":
             x = local_features
+
+        if sdk_only:
+            if self.training:
+                raise ValueError("SwinFace sdk_only 仅用于 eval 推理，训练使用完整分支")
+            branches = self.om.sdk_branches()
+            x = self.fam(x, branches=branches)
+            x = self.tss(x, branches=branches)
+            return self.om(x, embedding, sdk_only=True)
 
         x = self.fam(x)
         x = self.tss(x)
